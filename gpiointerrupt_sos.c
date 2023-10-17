@@ -17,7 +17,7 @@
  *    its contributors may be used to endorse or promote products derived
  *    from this software without specific prior written permission.
  *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONT=-/IBUTORS "AS IS"
  * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
  * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
  * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR
@@ -42,185 +42,427 @@
 
 /* Driver configuration */
 #include "ti_drivers_config.h"
-#include <ti/drivers/I2C.h>
 #include <ti/drivers/Timer.h>
-#include <ti/drivers/UART2.h>
 
-// Driver Handles - Global variables
-Timer_Handle timer0;
-volatile unsigned char TimerFlag = 0;
+// States
+// GP_Start is the starting of the SM
+// GP_Wait is the wait state
+// GP_SOS is the SOS state to display the SOS Morse code
+// GP_OK is the OK state to display the OK Morse code after the button press
+enum GP_States { GP_Start, GP_Wait, GP_SOS, GP_OK } GP_State; // Enum holding the state of the SM
 
-#define DISPLAY(x, y) UART2_write(uart, &output, x, y);
+unsigned int LetterWorker = 0x00;
+// SOS Letters
+// 0x01 = S1 character
+// 0x02 = O character
+// 0x04 = S2 character
 
-// UART Global Variables
-char output[64];
-int bytesToSend;
+// OK Letters
+// 0x01 = O character
+// 0x02 = K character
 
-// Driver Handles - Global variables
-UART2_Handle uart;
+// Wait Mode
+// 0x01 = 500ms wait
+// 0x02 = 500ms wait
+// 0x04 = 500ms wait
+// 0x08 = 500ms wait
+// 0x100 = 500ms wait
+// 0x200 = 500ms wait
+// 0x400 = 500ms wait
 
-// I2C Global Variables
-static const struct {
-    uint8_t address;
-    uint8_t resultReg;
-    char *id;
-} sensors[3] = {
-                { 0x48, 0x0000, "11X" },
-                { 0x49, 0x0000, "116" },
-                { 0x41, 0x0001, "006" }
-};
-uint8_t txBuffer[1];
-uint8_t rxBuffer[2];
-I2C_Transaction i2cTransaction;
-// Driver Handles - Global variables
-I2C_Handle i2c;
+unsigned int BitWorker = 0x00; // keeps track of which part of the character or pause between
+// S1 Character
+// 0x01 = 500ms dot
+// 0x02 = 500ms wait
+// 0x04 = 500ms dot
+// 0x08 = 500ms wait
+// 0x10 = 500ms dot
+// 0x20 = 500ms wait
+// 0x40 = 500ms wait
+// 0x80 = 500ms wait
 
-// Application Global Variables
-size_t bytesWritten = 0;
+// S2 Character
+// 0x01 = 500ms dot
+// 0x02 = 500ms wait
+// 0x04 = 500ms dot
+// 0x08 = 500ms wait
+// 0x10 = 500ms dot
 
-int16_t temperature = 0; // initial temperature, will grab from sensor
-int16_t setpoint = 25;   // initial setpoint, can be increased or decreased from buttons
-int16_t heat = 0;        // intial heat flag, 1 = heat, 0 = off
-int seconds = 0;         // initial seconds, will tick every 1000ms
+// O Character
+// 0x01 = 500ms dash
+// 0x02 = 500ms dash
+// 0x04 = 500ms dash
+// 0x08 = 500ms wait
+// 0x10 = 500ms dash
+// 0x20 = 500ms dash
+// 0x40 = 500ms dash
+// 0x80 = 500ms wait
+// 0x100 = 500ms dash
+// 0x200 = 500ms dash
+// 0x400 = 500ms dash
+// 0x800 = 500ms wait
+// 0x1000 = 500ms wait
+// 0x2000 = 500ms wait
 
+// K Character
+// 0x01 = 500ms dash
+// 0x02 = 500ms dash
+// 0x04 = 500ms dash
+// 0x08 = 500ms wait
+// 0x10 = 500ms dot
+// 0x20 = 500ms wait
+// 0x40 = 500ms dash
+// 0x80 = 500ms dash
+// 0x100 = 500ms dash
 
-//
-void initUART2(void)
+unsigned char StateToggler = 0x00; // Start in SOS Mode, 0/x01 is OK Mode
+
+void TickGP_Toggle()
 {
-    UART2_Params uartParams;
-    // Init the driver
-    // UART2_init();
-    // Configure the driver
-    UART2_Params_init(&uartParams);
-    uartParams.writeMode = UART2_Mode_BLOCKING;
-    uartParams.readMode = UART2_Mode_BLOCKING;
-    // uartParams.readReturnMode = UART_RETURN_FULL;
-    uartParams.baudRate = 115200;
-    // Open the driver
-    uart = UART2_open(CONFIG_UART2_0, &uartParams);
-    if (uart == NULL) {
-        /* UART_open() failed */
-        while (1);
+    printf("GP_State = %d LetterWorker = %x BitWorker = %x \n", GP_State, LetterWorker, BitWorker);
+    switch(GP_State) { // Transitions
+    case GP_Start:
+        GP_State = GP_SOS;
+        LetterWorker = 0x01;
+        BitWorker = 0x01;
+        break;
+
+    case GP_OK:
+        // If we are done, go to GP_Wait
+        if (LetterWorker == 0x04) {
+            printf("GP_Wait and switch!\n");
+            GP_State = GP_Wait;
+            LetterWorker = 0x01;
+            BitWorker = 0x01;
+        }
+        break;
+
+    case GP_SOS:
+        // If we are done, go to GP_Wait
+        if (LetterWorker == 0x08) {
+            printf("GP_Wait switch!\n");
+            GP_State = GP_Wait;
+            LetterWorker = 0x01;
+            BitWorker = 0x01;
+        }
+        break;
+
+    case GP_Wait:
+        // If we are done waiting 7 times
+        if (LetterWorker == 0x800 ) {
+            // If we are in SOS mode
+            if (StateToggler == 0x00) {
+                printf("GP_SOS switch!\n");
+                GP_State = GP_SOS;
+                LetterWorker = 0x01;
+                BitWorker = 0x01;
+
+            }
+            // Else we're in OK mode
+            else {
+                printf("GP_OK switch!\n");
+                GP_State = GP_OK;
+                LetterWorker = 0x01;
+                BitWorker = 0x01;
+            }
+        }
+        break;
     }
-}
 
+    switch(GP_State) { // Actions
+    case GP_Start:
+        break;
 
-//
-void timerCallback(Timer_Handle myHandle, int_fast16_t status)
-{
-    TimerFlag = 1;
-}
+    case GP_SOS:
+        switch(LetterWorker) {
+        case 0x01: // S1
+            switch (BitWorker) {
+            case 0x01: // dot
+                // Turn on Red
+                GPIO_write(CONFIG_GPIO_LED_0, CONFIG_GPIO_LED_ON);
+                BitWorker = BitWorker << 1;
+                break;
 
+            case 0x02: // wait
+                GPIO_write(CONFIG_GPIO_LED_0, CONFIG_GPIO_LED_OFF);
+                BitWorker = BitWorker << 1;
+                break;
 
-//
-void initTimer(void)
-{
-    Timer_Params params;
-    // Init the driver
-    Timer_init();
-    // Configure the driver
-    Timer_Params_init(&params);
-    params.period = 100000; // 100ms period
-    params.periodUnits = Timer_PERIOD_US;
-    params.timerMode = Timer_CONTINUOUS_CALLBACK;
-    params.timerCallback = timerCallback;
-    // Open the driver
-    timer0 = Timer_open(CONFIG_TIMER_0, &params);
-    if (timer0 == NULL) {
-        /* Failed to initialized timer */
-        while (1) {}
-    }
-    if (Timer_start(timer0) == Timer_STATUS_ERROR) {
-        /* Failed to start timer */
-        while (1) {}
-    }
-}
+            case 0x04: // dot
+                // Turn on Red
+                GPIO_write(CONFIG_GPIO_LED_0, CONFIG_GPIO_LED_ON);
+                BitWorker = BitWorker << 1;
+                break;
 
+            case 0x08: // wait
+                GPIO_write(CONFIG_GPIO_LED_0, CONFIG_GPIO_LED_OFF);
+                BitWorker = BitWorker << 1;
+                break;
 
-// Make sure you call initUART() before calling this function.
-void initI2C(void)
-{
-    int8_t i, found;
-    I2C_Params i2cParams;
-    DISPLAY(snprintf(output, 64, "Initializing I2C Driver - "), &bytesWritten)
-    // Init the driver
-    I2C_init();
-    // Configure the driver
-    I2C_Params_init(&i2cParams);
-    i2cParams.bitRate = I2C_400kHz;
-    // Open the driver
-    i2c = I2C_open(CONFIG_I2C_0, &i2cParams);
-    if (i2c == NULL)
-    {
-        DISPLAY(snprintf(output, 64, "Failed\n\r"), &bytesWritten)
-                                        while (1);
-    }
-    DISPLAY(snprintf(output, 32, "Passed\n\r"), &bytesWritten)
-    // Boards were shipped with different sensors.
-    // Welcome to the world of embedded systems.
-    // Try to determine which sensor we have.
-    // Scan through the possible sensor addresses
-    /* Common I2C transaction setup */
-    i2cTransaction.writeBuf = txBuffer;
-    i2cTransaction.writeCount = 1;
-    i2cTransaction.readBuf = rxBuffer;
-    i2cTransaction.readCount = 0;
-    found = false;
-    for (i=0; i<3; ++i)
-    {
-        i2cTransaction.targetAddress = sensors[i].address;
-        txBuffer[0] = sensors[i].resultReg;
-        DISPLAY(snprintf(output, 64, "Is this %s? ", sensors[i].id), &bytesWritten)
-        if (I2C_transfer(i2c, &i2cTransaction))
-        {
-            DISPLAY(snprintf(output, 64, "Found\n\r"), &bytesWritten)
-                                        found = true;
+            case 0x10: // dot
+                // Turn on Red
+                GPIO_write(CONFIG_GPIO_LED_0, CONFIG_GPIO_LED_ON);
+                BitWorker = BitWorker << 1;
+                break;
+
+            case 0x20: // wait
+                GPIO_write(CONFIG_GPIO_LED_0, CONFIG_GPIO_LED_OFF);
+                BitWorker = BitWorker << 1;
+                break;
+
+            case 0x40: // wait
+                BitWorker = BitWorker << 1;
+                break;
+
+            case 0x80: // wait
+                BitWorker = 0x01;
+                LetterWorker = LetterWorker << 1;
+                break;
+            }
             break;
+
+            case 0x02: // O
+                switch (BitWorker) {
+                case 0x01: // dash
+                    // Turn on Green
+                    GPIO_write(CONFIG_GPIO_LED_1, CONFIG_GPIO_LED_ON);
+                    BitWorker = BitWorker << 1;
+                    break;
+
+                case 0x02: // Dash
+                    BitWorker = BitWorker << 1;
+                    break;
+
+                case 0x04: // Dash
+                    BitWorker = BitWorker << 1;
+                    break;
+
+                case 0x08: // wait
+                    GPIO_write(CONFIG_GPIO_LED_1, CONFIG_GPIO_LED_OFF);
+                    BitWorker = BitWorker << 1;
+                    break;
+
+                case 0x10: // Dash
+                    // Turn on Green
+                    GPIO_write(CONFIG_GPIO_LED_1, CONFIG_GPIO_LED_ON);
+                    BitWorker = BitWorker << 1;
+                    break;
+
+                case 0x20: // Dash
+                    BitWorker = BitWorker << 1;
+                    break;
+
+                case 0x40: // Dash
+                    BitWorker = BitWorker << 1;
+                    break;
+
+                case 0x80: // Wait
+                    GPIO_write(CONFIG_GPIO_LED_1, CONFIG_GPIO_LED_OFF);
+                    BitWorker = BitWorker << 1;
+                    break;
+
+                case 0x100: // Dash
+                    // Turn on Green
+                    GPIO_write(CONFIG_GPIO_LED_1, CONFIG_GPIO_LED_ON);
+                    BitWorker = BitWorker << 1;
+                    break;
+
+                case 0x200: // Dash
+                    BitWorker = BitWorker << 1;
+                    break;
+
+                case 0x400: // Dash
+                    BitWorker = BitWorker << 1;
+                    break;
+
+                case 0x800: // Wait
+                    GPIO_write(CONFIG_GPIO_LED_1, CONFIG_GPIO_LED_OFF);
+                    BitWorker = BitWorker << 1;
+                    break;
+
+                case 0x1000: // Wait
+                    BitWorker = BitWorker << 1;
+                    break;
+
+                case 0x2000: // Wait
+                    BitWorker = 0x01;
+                    LetterWorker = LetterWorker << 1;
+                    break;
+
+                }
+                break;
+
+                case 0x04: // S2
+                    switch (BitWorker) {
+                    case 0x01: // dot
+                        // Turn on Red
+                        GPIO_write(CONFIG_GPIO_LED_0, CONFIG_GPIO_LED_ON);
+                        BitWorker = BitWorker << 1;
+                        break;
+
+                    case 0x02: // wait
+                        GPIO_write(CONFIG_GPIO_LED_0, CONFIG_GPIO_LED_OFF);
+                        BitWorker = BitWorker << 1;
+                        break;
+
+                    case 0x04: // dot
+                        // Turn on Red
+                        GPIO_write(CONFIG_GPIO_LED_0, CONFIG_GPIO_LED_ON);
+                        BitWorker = BitWorker << 1;
+                        break;
+
+                    case 0x08: // wait
+                        GPIO_write(CONFIG_GPIO_LED_0, CONFIG_GPIO_LED_OFF);
+                        BitWorker = BitWorker << 1;
+                        break;
+
+                    case 0x10: // dot
+                        // Turn on Red
+                        GPIO_write(CONFIG_GPIO_LED_0, CONFIG_GPIO_LED_ON);
+                        BitWorker = 0x01;
+                        LetterWorker = LetterWorker << 1;
+                        break;
+
+                    }
+                    break;
+
         }
-        DISPLAY(snprintf(output, 64, "No\n\r"), &bytesWritten)
+        break;
+
+        case GP_OK:
+            switch(LetterWorker) {
+            case 0x01: // O
+                switch (BitWorker) {
+                case 0x01: // dash
+                    // Turn on Green
+                    GPIO_write(CONFIG_GPIO_LED_1, CONFIG_GPIO_LED_ON);
+                    BitWorker = BitWorker << 1;
+                    break;
+
+                case 0x02: // Dash
+                    BitWorker = BitWorker << 1;
+                    break;
+
+                case 0x04: // Dash
+                    BitWorker = BitWorker << 1;
+                    break;
+
+                case 0x08: // wait
+                    GPIO_write(CONFIG_GPIO_LED_1, CONFIG_GPIO_LED_OFF);
+                    BitWorker = BitWorker << 1;
+                    break;
+
+                case 0x10: // Dash
+                    // Turn on Green
+                    GPIO_write(CONFIG_GPIO_LED_1, CONFIG_GPIO_LED_ON);
+                    BitWorker = BitWorker << 1;
+                    break;
+
+                case 0x20: // Dash
+                    BitWorker = BitWorker << 1;
+                    break;
+
+                case 0x40: // Dash
+                    BitWorker = BitWorker << 1;
+                    break;
+
+                case 0x80: // Wait
+                    GPIO_write(CONFIG_GPIO_LED_1, CONFIG_GPIO_LED_OFF);
+                    BitWorker = BitWorker << 1;
+                    break;
+
+                case 0x100: // Dash
+                    // Turn on Green
+                    GPIO_write(CONFIG_GPIO_LED_1, CONFIG_GPIO_LED_ON);
+                    BitWorker = BitWorker << 1;
+                    break;
+
+                case 0x200: // Dash
+                    BitWorker = BitWorker << 1;
+                    break;
+
+                case 0x400: // Dash
+                    BitWorker = BitWorker << 1;
+                    break;
+
+                case 0x800: // Wait
+                    GPIO_write(CONFIG_GPIO_LED_1, CONFIG_GPIO_LED_OFF);
+                    BitWorker = BitWorker << 1;
+                    break;
+
+                case 0x1000: // Wait
+                    BitWorker = BitWorker << 1;
+                    break;
+
+                case 0x2000: // Wait
+                    BitWorker = 0x01;
+                    LetterWorker = LetterWorker << 1;
+                    break;
+
+                }
+                break;
+
+                case 0x02: // K
+                    switch (BitWorker) {
+                    case 0x01: // dash
+                        // Turn on Green
+                        GPIO_write(CONFIG_GPIO_LED_1, CONFIG_GPIO_LED_ON);
+                        BitWorker = BitWorker << 1;
+                        break;
+
+                    case 0x02: // dash
+                        BitWorker = BitWorker << 1;
+                        break;
+
+                    case 0x04: // dash
+                        BitWorker = BitWorker << 1;
+                        break;
+
+                    case 0x08: // wait
+                        GPIO_write(CONFIG_GPIO_LED_1, CONFIG_GPIO_LED_OFF);
+                        BitWorker = BitWorker << 1;
+                        break;
+
+                    case 0x10: // dot
+                        // Turn on Red
+                        GPIO_write(CONFIG_GPIO_LED_0, CONFIG_GPIO_LED_ON);
+                        BitWorker = BitWorker << 1;
+                        break;
+
+                    case 0x20: // wait
+                        GPIO_write(CONFIG_GPIO_LED_0, CONFIG_GPIO_LED_OFF);
+                        BitWorker = BitWorker << 1;
+                        break;
+
+                    case 0x40: // dash
+                        // Turn on Green
+                        GPIO_write(CONFIG_GPIO_LED_1, CONFIG_GPIO_LED_ON);
+                        BitWorker = BitWorker << 1;
+                        break;
+
+                    case 0x80: // dash
+                        BitWorker = BitWorker << 1;
+                        break;
+
+                    case 0x100: // dash
+                        BitWorker = 0x01;
+                        LetterWorker = LetterWorker << 1;
+                        break;
+                    }
+                    break;
+
+            }
+            break;
+
+            case GP_Wait:
+                // Turn everything off
+                GPIO_write(CONFIG_GPIO_LED_0, CONFIG_GPIO_LED_OFF);
+                GPIO_write(CONFIG_GPIO_LED_1, CONFIG_GPIO_LED_OFF);
+                LetterWorker = LetterWorker << 1;
+                break;
     }
-    if(found)
-    {
-        DISPLAY(snprintf(output, 64, "Detected TMP%s I2C address: %x\n\r", sensors[i].id, i2cTransaction.targetAddress), &bytesWritten)
-    }
-    else
-    {
-        DISPLAY(snprintf(output, 64, "Temperature sensor not found, contact professor\n\r"), &bytesWritten)
-    }
+
 }
-
-
-// read the temperature sensor and return the value
-int16_t readTemp(void)
-{
-    int j;
-    int16_t temperature = 0;
-    i2cTransaction.readCount = 2;
-    if (I2C_transfer(i2c, &i2cTransaction))
-    {
-        /*
-         * Extract degrees C from the received data;
-         * see TMP sensor datasheet
-         */
-        temperature = (rxBuffer[0] << 8) | (rxBuffer[1]);
-        temperature *= 0.0078125;
-        /*
-         * If the MSB is set '1', then we have a 2's complement
-         * negative value which needs to be sign extended
-         */
-        if (rxBuffer[0] & 0x80)
-        {
-            temperature |= 0xF000;
-        }
-    }
-    else
-    {
-        DISPLAY(snprintf(output, 64, "Error reading temperature sensor (%d)\n\r",i2cTransaction.status), &bytesWritten);
-        DISPLAY(snprintf(output, 64, "Please power cycle your board by unplugging USB and plugging back in.\n\r"), &bytesWritten);
-    }
-    return temperature;
-}
-
 
 /*
  *  ======== gpioButtonFxn0 ========
@@ -230,8 +472,11 @@ int16_t readTemp(void)
  */
 void gpioButtonFxn0(uint_least8_t index)
 {
-    // increase setpoint
-    setpoint++;
+    /* Toggle an LED */
+    // GPIO_toggle(CONFIG_GPIO_LED_0);
+
+
+
 }
 
 /*
@@ -243,8 +488,51 @@ void gpioButtonFxn0(uint_least8_t index)
  */
 void gpioButtonFxn1(uint_least8_t index)
 {
-    // decrease setpoint
-    setpoint--;
+    /* Toggle an LED */
+    // GPIO_toggle(CONFIG_GPIO_LED_1);
+
+    printf("Time to toggle!\n");
+    if (StateToggler == 0x00)
+        StateToggler = 0x01;
+    else
+        StateToggler = 0x00;
+}
+
+/*
+ *  ======== timerCallback ========
+ *  Callback function for the timer interrupt on CONFIG_TIMER_0.
+ */
+void timerCallback(Timer_Handle myHandle, int_fast16_t status)
+{
+    TickGP_Toggle();
+    printf("Tick...");
+}
+
+/*
+ *  ======== initTimer ========
+ *  Initialize the timer on CONFIG_TIMER_0.
+ */
+void initTimer(void)
+{
+    Timer_Handle timer0;
+    Timer_Params params;
+    Timer_init();
+    Timer_Params_init(&params);
+    params.period = 500000;
+    params.periodUnits = Timer_PERIOD_US;
+    params.timerMode = Timer_CONTINUOUS_CALLBACK;
+    params.timerCallback = timerCallback;
+
+    timer0 = Timer_open(CONFIG_TIMER_0, &params);
+    if (timer0 == NULL) {
+        /* Failed to initialized timer */
+        while (1) {}
+    }
+
+    if (Timer_start(timer0) == Timer_STATUS_ERROR) {
+        /* Failed to start timer */
+        while (1) {}
+    }
 }
 
 /*
@@ -252,76 +540,37 @@ void gpioButtonFxn1(uint_least8_t index)
  */
 void *mainThread(void *arg0)
 {
-    int buttonPoll = 0;
-    int buttonPollMax = 200; // 200ms
-    int tempPoll = 0;
-    int tempPollMax = 500; // 500ms
-    int outputPoll = 0;
-    int outputPollMax = 1000; // 1000ms
-
     /* Call driver init functions */
     GPIO_init();
 
-    initUART2();
-    initI2C();
-    initTimer();
-
     /* Configure the LED and button pins */
     GPIO_setConfig(CONFIG_GPIO_LED_0, GPIO_CFG_OUT_STD | GPIO_CFG_OUT_LOW);
+    GPIO_setConfig(CONFIG_GPIO_LED_1, GPIO_CFG_OUT_STD | GPIO_CFG_OUT_LOW);
     GPIO_setConfig(CONFIG_GPIO_BUTTON_0, GPIO_CFG_IN_PU | GPIO_CFG_IN_INT_FALLING);
-    GPIO_setConfig(CONFIG_GPIO_BUTTON_1, GPIO_CFG_IN_PU | GPIO_CFG_IN_INT_FALLING);
+
+    /* Turn on user LED */
+    GPIO_write(CONFIG_GPIO_LED_0, CONFIG_GPIO_LED_ON);
 
     /* Install Button callback */
     GPIO_setCallback(CONFIG_GPIO_BUTTON_0, gpioButtonFxn0);
-    GPIO_setCallback(CONFIG_GPIO_BUTTON_1, gpioButtonFxn1);
 
     /* Enable interrupts */
     GPIO_enableInt(CONFIG_GPIO_BUTTON_0);
-    GPIO_enableInt(CONFIG_GPIO_BUTTON_1);
 
-    while (1) {
-        // Every 200ms check the button flags
-        if (buttonPoll == buttonPollMax) {
-            if (temperature < setpoint) {
-                heat = 1;
-            }
-            else {
-                heat = 0;
-            }
-            buttonPoll = 0; // reset poll
-        } else {
-            buttonPoll += 100; // not time yet, add period to poll
-        }
+    /*
+     *  If more than one input pin is available for your device, interrupts
+     *  will be enabled on CONFIG_GPIO_BUTTON1.
+     */
+    if (CONFIG_GPIO_BUTTON_0 != CONFIG_GPIO_BUTTON_1)
+    {
+        /* Configure BUTTON1 pin */
+        GPIO_setConfig(CONFIG_GPIO_BUTTON_1, GPIO_CFG_IN_PU | GPIO_CFG_IN_INT_FALLING);
 
-        // Every 500ms read the temperature and update the LED
-        if (tempPoll == tempPollMax) {
-            temperature = readTemp();
-            if (heat) {
-                /* Turn on user LED */
-                GPIO_write(CONFIG_GPIO_LED_0, CONFIG_GPIO_LED_ON);
-            } else {
-                GPIO_write(CONFIG_GPIO_LED_0, CONFIG_GPIO_LED_OFF);
-            }
-            tempPoll = 0; // reset poll
-        } else {
-            tempPoll += 100; // not time yet, add period to poll
-        }
-
-        if (outputPoll == outputPollMax) {
-            seconds++; // increment seconds
-            // Every second output the following to the UART
-            DISPLAY( snprintf(output, 64, "<%02d,%02d,%d,%04d>\n\r", temperature, setpoint, heat, seconds),  &bytesWritten);
-            outputPoll = 0; // reset poll
-        } else {
-            outputPoll += 100; // not time yet, add period to poll
-        }
-
-        // Setup the timerflag
-        while (!TimerFlag) {} // Wait for the timer period
-        TimerFlag = 0;        // Lower flag raised by the timer
-        ++timer0;
-
+        /* Install Button callback */
+        GPIO_setCallback(CONFIG_GPIO_BUTTON_1, gpioButtonFxn1);
+        GPIO_enableInt(CONFIG_GPIO_BUTTON_1);
     }
 
+    initTimer();
     return (NULL);
 }
